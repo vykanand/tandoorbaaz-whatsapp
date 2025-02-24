@@ -223,7 +223,7 @@ async function connectToWhatsApp() {
             text: `Order Confirmed! ✅\nOrder ID: ${order.id}\nItem: ${item.name}\nQuantity: ${quantity}\nTotal: ₹${total}\n\n 📞\nThank you for ordering from Tandoorbaaz! 🙏`,
           });
 
-          const paymentWebUrl = `https://tandoor-pay212.tiiny.site/?amount=${total}&orderId=${order.id}`;
+          const paymentWebUrl = `https://www.tandoorbaaz.shop/buy/pay.html/?amount=${total}&orderId=${order.id}`;
           await sock.sendMessage(message.key.remoteJid, {
             text: `Click here to pay ₹${total}: ${paymentWebUrl}\n\nChoose your preferred payment app 📱 and Make the payment! 💰`,
           });
