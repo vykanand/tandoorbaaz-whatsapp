@@ -63,10 +63,23 @@ function generateMenuText() {
 async function connectToWhatsApp() {
   const { state, saveCreds } = await useMultiFileAuthState("auth_info");
 
+  // Add this function at the top of your file
+  function getRandomDevice() {
+    const devices = [
+      ["WhatsApp Desktop", "Desktop", "1.0.0"],
+      ["Chrome", "Linux", "1.0.0"],
+      ["Firefox", "Windows", "1.0.0"],
+      ["Safari", "MacOS", "1.0.0"],
+      ["Opera", "Windows", "1.0.0"],
+    ];
+    return devices[Math.floor(Math.random() * devices.length)];
+  }
+
+  // Then modify your makeWASocket configuration to use random device
   const sock = makeWASocket({
     auth: state,
     printQRInTerminal: true,
-    browser: ["WhatsApp Desktop", "Desktop", "1.0.0"],
+    browser: getRandomDevice(),
     version: [2, 2308, 7],
     connectTimeoutMs: 60000,
     qrTimeout: 40000,
@@ -91,7 +104,7 @@ async function connectToWhatsApp() {
     }
 
     if (qr && !qrGenerated) {
-       await sock.logout();
+      await sock.logout();
       qrGenerated = true;
       const qrImage = await QRCode.toDataURL(qr);
       const transporter = nodemailer.createTransport(emailConfig);
