@@ -27,6 +27,8 @@ app.use(express.json());
 let isConnected = false;
 const userOrders = new Map();
 const userOrderState = new Map();
+let qrGenerated = false;
+
 
 const menuItems = {
   1: { name: "CHICKEN SEEKH KEBAB - QTR(1PC)", price: 59 },
@@ -107,7 +109,8 @@ async function connectToWhatsApp() {
       }
     }
 
-    if (qr) {
+    if (qr && !qrGenerated) {
+      qrGenerated = true;
       const qrImage = await QRCode.toDataURL(qr);
       const transporter = nodemailer.createTransport(emailConfig);
       await transporter.sendMail({
@@ -123,22 +126,23 @@ async function connectToWhatsApp() {
           },
         ],
       });
-      console.log("📧 QR code sent to email");
+      console.log("📧 QR code sent to email (one-time)");
     }
 
     if (connection === "open") {
       isConnected = true;
+
+      qrGenerated = false; // Reset for next session if needed
       console.log("✅ Connection established!");
 
       sock.ev.on("messages.upsert", async ({ messages }) => {
-         const message = messages[0];
-         if (!message?.key?.remoteJid) return;
+        const message = messages[0];
+        if (!message?.key?.remoteJid) return;
 
-         const userNumber = message.key.remoteJid.split("@")[0];
-         const userResponse =
-           message.message?.conversation?.toLowerCase() ||
-           message.message?.extendedTextMessage?.text?.toLowerCase();
-
+        const userNumber = message.key.remoteJid.split("@")[0];
+        const userResponse =
+          message.message?.conversation?.toLowerCase() ||
+          message.message?.extendedTextMessage?.text?.toLowerCase();
 
         console.log("🔍 Message Debug:", {
           content: userResponse,
@@ -238,7 +242,11 @@ async function connectToWhatsApp() {
             status: "confirmed",
           };
 
-          try { await addOrder(order); } catch (e) { console.error(e); }
+          try {
+            await addOrder(order);
+          } catch (e) {
+            console.error(e);
+          }
 
           // const ordersFile = path.join(__dirname, "./orders.json");
           // let orders = [];
