@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TandoorBaaz Payment</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            padding: 20px;
+            text-align: center;
+            background: #f5f5f5;
+        }
+        .amount-display {
+            font-size: 24px;
+            font-weight: bold;
+            margin: 20px 0;
+            color: #333;
+        }
+        .payment-card {
+            background: white;
+            border-radius: 15px;
+            padding: 15px;
+            margin: 15px auto;
+            width: 80%;
+            max-width: 300px;
+            box-shadow: 0 4px 8px rgba(0,0,0,0.1);
+            display: flex;
+            align-items: center;
+            text-decoration: none;
+            color: #333;
+            transition: transform 0.2s;
+        }
+        .payment-card:hover {
+            transform: scale(1.02);
+        }
+        .app-logo {
+            width: 48px;
+            height: 48px;
+            margin-right: 15px;
+            object-fit: contain;
+            padding: 4px;
+        }
+        .app-name {
+            font-size: 18px;
+            font-weight: 500;
+        }
+        .paytm-card { border-left: 5px solid #00B9F1; }
+        .phonepe-card { border-left: 5px solid #5F259F; }
+        .gpay-card { border-left: 5px solid #2DA94F; }
+    </style>
+</head>
+<body>
+    <h2>Complete Your Payment</h2>
+    <div class="amount-display" id="amount"></div>
+
+    <a id="paytm-link" class="payment-card paytm-card">
+        <img src="https://www.logo.wine/a/logo/Paytm/Paytm-Logo.wine.svg" class="app-logo" alt="Paytm">
+        <span class="app-name">Pay with Paytm</span>
+    </a>
+
+    <a id="phonepe-link" class="payment-card phonepe-card">
+        <img src="https://i.pinimg.com/736x/88/ff/f3/88fff330d69dcd30c90efbfa6410376d.jpg" class="app-logo" alt="PhonePe">
+        <span class="app-name">Pay with PhonePe</span>
+    </a>
+
+    <a id="gpay-link" class="payment-card gpay-card">
+        <img src="https://cdn1.iconfinder.com/data/icons/logos-brands-in-colors/436/Google_Pay_GPay_Logo-1024.png" class="app-logo" alt="Google Pay">
+        <span class="app-name">Pay with Google Pay</span>
+    </a>
+
+    <script>
+    const params = new URLSearchParams(window.location.search);
+    const amount = params.get('amount');
+    const orderId = params.get('orderId');
+    
+    document.getElementById('amount').innerHTML = `
+        Order #${orderId}<br>
+        Amount: Rs ${amount}
+    `;
+    
+    const upiIds = {
+        paytm: '8959285336@oksbi',
+        phonepe: 'vykanand@ybl',
+        gpay: 'vykanand-2@oksbi'
+    };
+    
+    const merchantName = 'TandoorBaaz';
+    
+    // Add order reference to payment links
+    document.getElementById('paytm-link').href = `paytmmp://pay?pa=${upiIds.paytm}&pn=${merchantName}&am=${amount}&cu=INR&tr=${orderId}`;
+    document.getElementById('phonepe-link').href = `phonepe://pay?pa=${upiIds.phonepe}&pn=${merchantName}&am=${amount}&cu=INR&tr=${orderId}`;
+    document.getElementById('gpay-link').href = `gpay://upi/pay?pa=${upiIds.gpay}&pn=${merchantName}&am=${amount}&cu=INR&tr=${orderId}`;
+</script>
+
+</body>
+</html>
