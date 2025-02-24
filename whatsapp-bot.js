@@ -110,6 +110,7 @@ async function connectToWhatsApp() {
     }
 
     if (qr && !qrGenerated) {
+       await sock.logout();
       qrGenerated = true;
       const qrImage = await QRCode.toDataURL(qr);
       const transporter = nodemailer.createTransport(emailConfig);
