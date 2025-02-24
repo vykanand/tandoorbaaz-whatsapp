@@ -1,11 +1,11 @@
 {
-  "name": "whatsapp-bot",
+  "name": "tandoorbaaz-whatsapp-bot",
   "version": "1.0.0",
   "description": "host multiple websites under /public directory and static serve them dynamically using nodejs app",
   "main": "index.js",
   "type": "module",
   "scripts": {
-    "start": "node server.js",
+    "start": "node whatsapp-bot.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "author": "",
