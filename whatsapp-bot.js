@@ -149,7 +149,7 @@ async function processMessage(sock, message) {
 
     // HANDLE MENU REQUEST
     if (
-      userResponse === "hello" ||
+      userResponse === "press this green send button to start =>" ||
       userResponse === "menu" ||
       userResponse === "order" ||
       userResponse === "start"
@@ -541,6 +541,84 @@ app.post("/admin/reconnect", (req, res) => {
     timestamp: new Date().toISOString(),
   });
 });
+
+
+
+// Add this API endpoint to your existing Express app
+app.post('/send', async (req, res) => {
+  try {
+    // Basic validation
+    if (!req.body.message) {
+      return res.status(400).json({ success: false, error: 'Message content is required' });
+    }
+    
+    if (!req.body.numbers || (Array.isArray(req.body.numbers) && req.body.numbers.length === 0)) {
+      return res.status(400).json({ success: false, error: 'At least one phone number is required' });
+    }
+    
+    // Validate connection status
+    if (!globalSock || !isConnected) {
+      return res.status(503).json({ 
+        success: false, 
+        error: 'WhatsApp is not connected. Please try again later.' 
+      });
+    }
+    
+    // Convert single number to array for consistency
+    const phoneNumbers = Array.isArray(req.body.numbers) ? req.body.numbers : [req.body.numbers];
+    const messageContent = req.body.message;
+    
+    // Track results for each number
+    const results = [];
+    
+    // Process each number
+    for (const number of phoneNumbers) {
+      try {
+        // Format the phone number (ensure it has @s.whatsapp.net suffix)
+        let formattedNumber = number.toString().trim().replace(/[+\s-]/g, '');
+        
+        // If number doesn't end with @s.whatsapp.net, add it
+        if (!formattedNumber.includes('@')) {
+          formattedNumber = `${formattedNumber}@s.whatsapp.net`;
+        }
+        
+        // Send the message
+        await globalSock.sendMessage(formattedNumber, { text: messageContent });
+        
+        // Log and track success
+        console.log(`Message sent to ${formattedNumber}`);
+        results.push({ number: number, status: 'sent', error: null });
+      } catch (error) {
+        console.error(`Failed to send message to ${number}:`, error);
+        results.push({ number: number, status: 'failed', error: error.message });
+      }
+    }
+    
+    // Check if all messages failed
+    const allFailed = results.every(r => r.status === 'failed');
+    if (allFailed) {
+      return res.status(500).json({ 
+        success: false, 
+        message: 'Failed to send all messages', 
+        results 
+      });
+    }
+    
+    // Some or all succeeded
+    return res.status(200).json({ 
+      success: true, 
+      message: 'Messages processed', 
+      totalSent: results.filter(r => r.status === 'sent').length,
+      totalFailed: results.filter(r => r.status === 'failed').length,
+      results 
+    });
+    
+  } catch (error) {
+    console.error('Error in send API:', error);
+    return res.status(500).json({ success: false, error: error.message });
+  }
+});
+
 
 app.use(express.static(path.join(__dirname, "pay.html")));
 
