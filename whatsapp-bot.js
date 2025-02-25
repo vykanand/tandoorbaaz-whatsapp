@@ -149,7 +149,7 @@ async function processMessage(sock, message) {
 
     // HANDLE MENU REQUEST
     if (
-      userResponse === "Welcome to Tandoorbaaz!\npress send button to start your order=>" ||
+      userResponse === "Welcome to Tandoorbaaz! Press send button to start your order=>" ||
       userResponse === "menu" ||
       userResponse === "order" ||
       userResponse === "start"
