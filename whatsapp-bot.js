@@ -7,7 +7,6 @@ import QRCode from "qrcode";
 import nodemailer from "nodemailer";
 import { addOrder } from "./firebase-dao.js";
 import axios from "axios";
-import pino from "pino";
 
 const { makeWASocket, useMultiFileAuthState, DisconnectReason } = pkg;
 
@@ -45,6 +44,13 @@ const userOrders = new Map();
 const userOrderState = new Map();
 let qrGenerated = false;
 let isConnected = false;
+let currentConnection = null;
+let messageHandlerActive = false;
+
+// Add message deduplication
+const processedMessages = new Set();
+// Set a reasonable expiration time for processed message IDs
+const MESSAGE_EXPIRY_MS = 30000; // 30 seconds
 
 // Add this function to generate dynamic menu text
 function generateMenuText() {
@@ -87,26 +93,38 @@ async function connectToWhatsApp() {
   // Don't clear sessions - keep them persistent
   console.log("Using existing session if available...");
 
+  // Clean up previous connection if it exists
+  if (currentConnection) {
+    try {
+      console.log("Cleaning up previous connection...");
+      currentConnection.ev.removeAllListeners();
+    } catch (error) {
+      console.error("Error cleaning up previous connection:", error);
+    }
+  }
+
   const { state, saveCreds } = await useMultiFileAuthState("auth_info");
 
   const sock = makeWASocket({
     auth: state,
     printQRInTerminal: true,
-    browser: ["Chrome", "Windows", "10"], // Consistent, widely-used browser info
-    version: [2, 2429, 7], // Updated version
-    connectTimeoutMs: 120000, // Increase timeouts
+    browser: ["Chrome", "Windows", "10"],
+    version: [2, 2429, 7],
+    connectTimeoutMs: 120000,
     qrTimeout: 60000,
     defaultQueryTimeoutMs: 120000,
     retryRequestDelayMs: 3000,
-    syncFullHistory: false, // Skip full history sync to reduce errors
-    downloadHistory: false, // Don't download media history
-    markOnlineOnConnect: false, // Don't mark as online to reduce suspicion
+    syncFullHistory: false,
+    downloadHistory: false,
+    markOnlineOnConnect: false,
     transactionOpts: {
       maxCommitRetries: 3,
       delayBetweenTriesMs: 5000,
     },
-    // Removed the custom logger configuration that was causing the error
   });
+
+  // Store current connection for cleanup on reconnect
+  currentConnection = sock;
 
   sock.ev.on("connection.update", async (update) => {
     const { connection, lastDisconnect, qr } = update;
@@ -123,7 +141,6 @@ async function connectToWhatsApp() {
         statusCode
       );
 
-      // Only clear session if explicitly logged out or session invalid
       if (
         statusCode === DisconnectReason.loggedOut ||
         errorMessage.includes("invalid") ||
@@ -132,13 +149,14 @@ async function connectToWhatsApp() {
         console.log(
           "Session expired or invalid. Will need new QR code on reconnection."
         );
-        // No need to manually clear sessions, the library will handle this
       }
 
       const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
 
       if (shouldReconnect) {
         console.log("Attempting to reconnect in 5 seconds...");
+        // Reset message handler flag
+        messageHandlerActive = false;
         setTimeout(() => {
           connectToWhatsApp(); // Reconnect with delay
         }, 5000);
@@ -149,7 +167,6 @@ async function connectToWhatsApp() {
 
     if (qr && !qrGenerated) {
       qrGenerated = true;
-      // Don't logout when getting QR code
       await sendQrCodeEmail(qr);
       console.log("🔄 QR Code generated - check your email or terminal");
     }
@@ -158,12 +175,32 @@ async function connectToWhatsApp() {
       isConnected = true;
       qrGenerated = false; // Reset QR flag for next session
       console.log("✅ Connection established successfully!");
-      handleMessages(sock);
+
+      // Only set up message handler if not already active
+      if (!messageHandlerActive) {
+        messageHandlerActive = true;
+        handleMessages(sock);
+      }
     }
   });
 
   sock.ev.on("creds.update", saveCreds);
 }
+
+// Periodically clean up the processed messages set
+function cleanupProcessedMessages() {
+  const now = Date.now();
+  // Clean up expired message IDs
+  for (const item of processedMessages) {
+    // Format is "msgId:timestamp"
+    const [, timestamp] = item.split(":");
+    if (now - parseInt(timestamp) > MESSAGE_EXPIRY_MS) {
+      processedMessages.delete(item);
+    }
+  }
+}
+
+setInterval(cleanupProcessedMessages, 60000); // Run cleanup every minute
 
 async function handleMessages(sock) {
   sock.ev.on("messages.upsert", async ({ messages }) => {
@@ -173,6 +210,20 @@ async function handleMessages(sock) {
 
       // Filter out status messages/broadcasts
       if (message.key.remoteJid === "status@broadcast") return;
+
+      // Implement message deduplication
+      const messageId = message.key.id;
+      const timestamp = Date.now();
+      const dedupKey = `${messageId}:${timestamp}`;
+
+      // Skip if we've processed this message recently
+      if (processedMessages.has(dedupKey)) {
+        console.log(`Skipping duplicate message: ${messageId}`);
+        return;
+      }
+
+      // Mark this message as processed
+      processedMessages.add(dedupKey);
 
       const userNumber = message.key.remoteJid.split("@")[0];
       const userResponse =
@@ -283,7 +334,6 @@ app.use(express.static(path.join(__dirname, "pay.html")));
 const PORT = 3010;
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
-  // Add a small delay before connecting to ensure server is ready
   setTimeout(() => {
     connectToWhatsApp();
   }, 1000);
