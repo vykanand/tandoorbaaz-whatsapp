@@ -5,8 +5,9 @@ import { fileURLToPath } from "url";
 import fs from "fs";
 import QRCode from "qrcode";
 import nodemailer from "nodemailer";
-import { addOrder, getOrders, updateOrder } from "./firebase-dao.js";
-
+import { addOrder } from "./firebase-dao.js";
+import axios from "axios";
+import pino from "pino";
 
 const { makeWASocket, useMultiFileAuthState, DisconnectReason } = pkg;
 
@@ -24,12 +25,6 @@ const __dirname = path.dirname(__filename);
 const app = express();
 app.use(express.json());
 
-let isConnected = false;
-const userOrders = new Map();
-const userOrderState = new Map();
-let qrGenerated = false;
-
-
 const menuItems = {
   1: { name: "CHICKEN SEEKH KEBAB - QTR(1PC)", price: 59 },
   2: { name: "CHICKEN TIKKA - QTR(4PC)", price: 79 },
@@ -46,6 +41,11 @@ const menuItems = {
   13: { name: "RUMALI ROTI", price: 10 },
 };
 
+const userOrders = new Map();
+const userOrderState = new Map();
+let qrGenerated = false;
+let isConnected = false;
+
 // Add this function to generate dynamic menu text
 function generateMenuText() {
   let menuText = `Welcome to Tandoorbaaz! 🔥\n\nOur Menu:\n`;
@@ -59,223 +59,232 @@ function generateMenuText() {
   return menuText;
 }
 
+async function sendQrCodeEmail(qr) {
+  const qrImage = await QRCode.toDataURL(qr);
+  const transporter = nodemailer.createTransport(emailConfig);
+
+  await transporter.sendMail({
+    from: "vykanand@gmail.com",
+    to: "vykanand@gmail.com",
+    subject: "TandoorBaaz Bot - New Login QR Code",
+    html: `<h2>Scan this QR code to reconnect the bot</h2>`,
+    attachments: [
+      {
+        filename: "qr-code.png",
+        content: qrImage.split("base64,")[1],
+        encoding: "base64",
+      },
+    ],
+  });
+
+  console.log("📧 QR code sent to email (one-time)");
+}
+
+// Configure axios with timeout
+axios.defaults.timeout = 30000; // 30 second timeout
 
 async function connectToWhatsApp() {
+  // Don't clear sessions - keep them persistent
+  console.log("Using existing session if available...");
+
   const { state, saveCreds } = await useMultiFileAuthState("auth_info");
 
-  // Add this function at the top of your file
-  function getRandomDevice() {
-    const devices = [
-      ["WhatsApp Desktop", "Desktop", "1.0.0"],
-      ["Chrome", "Linux", "1.0.0"],
-      ["Firefox", "Windows", "1.0.0"],
-      ["Safari", "MacOS", "1.0.0"],
-      ["Opera", "Windows", "1.0.0"],
-    ];
-    return devices[Math.floor(Math.random() * devices.length)];
-  }
-
-  // Then modify your makeWASocket configuration to use random device
   const sock = makeWASocket({
     auth: state,
     printQRInTerminal: true,
-    browser: getRandomDevice(),
-    version: [2, 2308, 7],
-    connectTimeoutMs: 60000,
-    qrTimeout: 40000,
-    defaultQueryTimeoutMs: 60000,
-    retryRequestDelayMs: 2000,
+    browser: ["Chrome", "Windows", "10"], // Consistent, widely-used browser info
+    version: [2, 2429, 7], // Updated version
+    connectTimeoutMs: 120000, // Increase timeouts
+    qrTimeout: 60000,
+    defaultQueryTimeoutMs: 120000,
+    retryRequestDelayMs: 3000,
+    syncFullHistory: false, // Skip full history sync to reduce errors
+    downloadHistory: false, // Don't download media history
+    markOnlineOnConnect: false, // Don't mark as online to reduce suspicion
+    transactionOpts: {
+      maxCommitRetries: 3,
+      delayBetweenTriesMs: 5000,
+    },
+    // Removed the custom logger configuration that was causing the error
   });
 
   sock.ev.on("connection.update", async (update) => {
     const { connection, lastDisconnect, qr } = update;
 
     if (connection === "close") {
-      const shouldReconnect =
-        lastDisconnect?.error?.output?.statusCode !==
-        DisconnectReason.loggedOut;
+      const statusCode = lastDisconnect?.error?.output?.statusCode;
+      const errorMessage =
+        lastDisconnect?.error?.output?.payload?.message || "Unknown error";
+
       console.log(
-        "Connection closed due to ",
-        lastDisconnect?.error?.output?.payload?.message
+        "Connection closed due to:",
+        errorMessage,
+        "Status code:",
+        statusCode
       );
+
+      // Only clear session if explicitly logged out or session invalid
+      if (
+        statusCode === DisconnectReason.loggedOut ||
+        errorMessage.includes("invalid") ||
+        errorMessage.includes("expired")
+      ) {
+        console.log(
+          "Session expired or invalid. Will need new QR code on reconnection."
+        );
+        // No need to manually clear sessions, the library will handle this
+      }
+
+      const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
+
       if (shouldReconnect) {
-        connectToWhatsApp();
+        console.log("Attempting to reconnect in 5 seconds...");
+        setTimeout(() => {
+          connectToWhatsApp(); // Reconnect with delay
+        }, 5000);
+      } else {
+        console.log("Not reconnecting - user logged out");
       }
     }
 
     if (qr && !qrGenerated) {
-      await sock.logout();
       qrGenerated = true;
-      const qrImage = await QRCode.toDataURL(qr);
-      const transporter = nodemailer.createTransport(emailConfig);
-      await transporter.sendMail({
-        from: "vykanand@gmail.com",
-        to: "vykanand@gmail.com",
-        subject: "TandoorBaaz Bot - New Login QR Code",
-        html: `<h2>Scan this QR code to reconnect the bot</h2>`,
-        attachments: [
-          {
-            filename: "qr-code.png",
-            content: qrImage.split("base64,")[1],
-            encoding: "base64",
-          },
-        ],
-      });
-      console.log("📧 QR code sent to email (one-time)");
+      // Don't logout when getting QR code
+      await sendQrCodeEmail(qr);
+      console.log("🔄 QR Code generated - check your email or terminal");
     }
 
     if (connection === "open") {
       isConnected = true;
-
-      qrGenerated = false; // Reset for next session if needed
-      console.log("✅ Connection established!");
-
-      sock.ev.on("messages.upsert", async ({ messages }) => {
-        const message = messages[0];
-        if (!message?.key?.remoteJid) return;
-
-        const userNumber = message.key.remoteJid.split("@")[0];
-        const userResponse =
-          message.message?.conversation?.toLowerCase() ||
-          message.message?.extendedTextMessage?.text?.toLowerCase();
-
-        console.log("🔍 Message Debug:", {
-          content: userResponse,
-          fromMe: message.key.fromMe,
-          number: userNumber,
-          state: userOrderState.get(userNumber),
-        });
-
-        if (!userResponse) {
-          console.log("📝 Skipping empty message");
-          return;
-        }
-
-        console.log(`📩 Processing message: ${userResponse}`);
-        console.log(`🔄 Current state: ${userOrderState.get(userNumber)}`);
-
-        if (
-          userResponse === "hello" ||
-          userResponse === "menu" ||
-          userResponse === "order"
-        ) {
-          // Add delay between messages to prevent rate limiting
-          await new Promise((resolve) => setTimeout(resolve, 1000));
-
-          userOrderState.set(userNumber, "awaitingMenuChoice");
-          // const welcomeMessage = `Welcome to Tandoorbaaz! 🔥
-          // Our Menu:
-          // 1. CHICKEN SEEKH KEBAB - QTR(1PC) - ₹59
-          // 2. TANDOORI CHICKEN - QTR(2PC) - ₹89
-          // 3. CHICKEN TIKKA - HALF(8PC) - ₹149
-
-          // Reply with item number to select (e.g. "2" for TANDOORI CHICKEN)`;
-          // await sock.sendMessage(
-          //   message.key.remoteJid,
-          //   {
-          //     text: welcomeMessage,
-          //     detectLinks: true,
-          //   },
-          //   { quoted: message }
-          // );
-          await sock.sendMessage(
-            message.key.remoteJid,
-            {
-              text: generateMenuText(),
-              detectLinks: true,
-            },
-            { quoted: message }
-          );
-          return;
-        }
-
-        if (
-          userOrderState.get(userNumber) === "awaitingMenuChoice" &&
-          /^[1-3]$/.test(userResponse)
-        ) {
-          const selectedItem = menuItems[userResponse];
-          userOrders.set(userNumber, userResponse);
-          userOrderState.set(userNumber, "awaitingQuantity");
-
-          console.log(
-            `🛒 Selected menu item ${userResponse}: ${selectedItem.name}`
-          );
-          await sock.sendMessage(message.key.remoteJid, {
-            text: `You selected: ${selectedItem.name}\nPrice: ₹${selectedItem.price}\n\nHow many would you like to order? Reply with quantity.`,
-          });
-          return;
-        }
-
-        if (
-          userOrderState.get(userNumber) === "awaitingQuantity" &&
-          /^\d+$/.test(userResponse)
-        ) {
-          const quantity = parseInt(userResponse);
-          const selectedItemId = userOrders.get(userNumber);
-          const item = menuItems[selectedItemId];
-          const total = item.price * quantity;
-
-          console.log(`📦 Processing order - Quantity: ${quantity}`);
-
-          const order = {
-            id: Date.now(),
-            items: [
-              {
-                id: parseInt(selectedItemId),
-                name: item.name,
-                price: item.price,
-                quantity: quantity,
-              },
-            ],
-            total: total,
-            timestamp: new Date().toISOString(),
-            customerDetails: {
-              phone: userNumber,
-              orderTime: new Date().toLocaleString("en-IN"),
-            },
-            createdAt: new Date().toISOString(),
-            status: "confirmed",
-          };
-
-          try {
-            await addOrder(order);
-          } catch (e) {
-            console.error(e);
-          }
-
-          // const ordersFile = path.join(__dirname, "./orders.json");
-          // let orders = [];
-          // if (fs.existsSync(ordersFile)) {
-          //   orders = JSON.parse(fs.readFileSync(ordersFile, "utf8"));
-          // }
-          // orders.push(order);
-          // fs.writeFileSync(ordersFile, JSON.stringify(orders, null, 2));
-
-          await sock.sendMessage(message.key.remoteJid, {
-            text: `Order Confirmed! ✅\nOrder ID: ${order.id}\nItem: ${item.name}\nQuantity: ${quantity}\nTotal: ₹${total}\n\n 📞\nThank you for ordering from Tandoorbaaz! 🙏`,
-          });
-
-          const paymentWebUrl = `https://www.tandoorbaaz.shop/buy/pay.html/?amount=${total}&orderId=${order.id}`;
-          await sock.sendMessage(message.key.remoteJid, {
-            text: `Click here to pay ₹${total}: ${paymentWebUrl}\n\nChoose your preferred payment app 📱 and Make the payment! 💰`,
-          });
-
-          userOrderState.delete(userNumber);
-          userOrders.delete(userNumber);
-          return;
-        }
-      });
+      qrGenerated = false; // Reset QR flag for next session
+      console.log("✅ Connection established successfully!");
+      handleMessages(sock);
     }
   });
 
   sock.ev.on("creds.update", saveCreds);
 }
 
-app.use(express.static(path.join(__dirname, "pay.html")));
+async function handleMessages(sock) {
+  sock.ev.on("messages.upsert", async ({ messages }) => {
+    try {
+      const message = messages[0];
+      if (!message?.key?.remoteJid) return;
 
+      // Filter out status messages/broadcasts
+      if (message.key.remoteJid === "status@broadcast") return;
+
+      const userNumber = message.key.remoteJid.split("@")[0];
+      const userResponse =
+        message.message?.conversation?.toLowerCase() ||
+        message.message?.extendedTextMessage?.text?.toLowerCase();
+
+      if (!userResponse) return;
+
+      console.log(`Received message from ${userNumber}: ${userResponse}`);
+
+      if (
+        userResponse === "hello" ||
+        userResponse === "menu" ||
+        userResponse === "order"
+      ) {
+        userOrderState.set(userNumber, "awaitingMenuChoice");
+        await sock.sendMessage(
+          message.key.remoteJid,
+          {
+            text: generateMenuText(),
+            detectLinks: true,
+          },
+          { quoted: message }
+        );
+        return;
+      }
+
+      if (
+        userOrderState.get(userNumber) === "awaitingMenuChoice" &&
+        /^[1-9]([0-9])?$/.test(userResponse) &&
+        menuItems[userResponse]
+      ) {
+        const selectedItem = menuItems[userResponse];
+        userOrders.set(userNumber, userResponse);
+        userOrderState.set(userNumber, "awaitingQuantity");
+
+        await sock.sendMessage(message.key.remoteJid, {
+          text: `You selected: ${selectedItem.name}\nPrice: ₹${selectedItem.price}\n\nHow many would you like to order? Reply with quantity.`,
+        });
+        return;
+      }
+
+      if (
+        userOrderState.get(userNumber) === "awaitingQuantity" &&
+        /^\d+$/.test(userResponse)
+      ) {
+        const quantity = parseInt(userResponse);
+        const selectedItemId = userOrders.get(userNumber);
+        const item = menuItems[selectedItemId];
+        const total = item.price * quantity;
+
+        const order = {
+          id: Date.now(),
+          items: [
+            {
+              id: parseInt(selectedItemId),
+              name: item.name,
+              price: item.price,
+              quantity: quantity,
+            },
+          ],
+          total: total,
+          timestamp: new Date().toISOString(),
+          customerDetails: {
+            phone: userNumber,
+            orderTime: new Date().toLocaleString("en-IN"),
+          },
+          createdAt: new Date().toISOString(),
+          status: "confirmed",
+        };
+
+        try {
+          await addOrder(order);
+          console.log(`New order created: ${order.id} for ${userNumber}`);
+        } catch (e) {
+          console.error("Error saving order to Firebase:", e);
+        }
+
+        await sock.sendMessage(message.key.remoteJid, {
+          text: `Order Confirmed! ✅\nOrder ID: ${order.id}\nItem: ${item.name}\nQuantity: ${quantity}\nTotal: ₹${total}\n\n 📞\nThank you for ordering from Tandoorbaaz! 🙏`,
+        });
+
+        const paymentWebUrl = `https://www.tandoorbaaz.shop/buy/pay.html/?amount=${total}&orderId=${order.id}`;
+        await sock.sendMessage(message.key.remoteJid, {
+          text: `Click here to pay ₹${total}: ${paymentWebUrl}\n\nChoose your preferred payment app 📱 and Make the payment! 💰`,
+        });
+
+        userOrderState.delete(userNumber);
+        userOrders.delete(userNumber);
+      }
+    } catch (error) {
+      console.error("Error handling message:", error);
+    }
+  });
+}
+
+// Add health check endpoint
+app.get("/health", (req, res) => {
+  res.status(200).json({
+    status: "OK",
+    connected: isConnected,
+    timestamp: new Date().toISOString(),
+  });
+});
+
+app.use(express.static(path.join(__dirname, "pay.html")));
 
 const PORT = 3010;
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
-  connectToWhatsApp();
+  // Add a small delay before connecting to ensure server is ready
+  setTimeout(() => {
+    connectToWhatsApp();
+  }, 1000);
 });
