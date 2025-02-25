@@ -9,7 +9,10 @@ import {
   deleteDoc,
   doc,
   updateDoc,
+  setDoc,
+  getDoc,
 } from "firebase/firestore";
+import os from "os"; // Import OS module in ES module style
 
 const firebaseConfig = {
   apiKey: "AIzaSyAEKHWdRyzI8WyBeGeesjDrM-nEzOXCuNk",
@@ -24,6 +27,7 @@ const firebaseConfig = {
 const app = initializeApp(firebaseConfig);
 const db = getFirestore(app);
 
+// Original functions for order management
 async function addOrder(orderData) {
   try {
     const docRef = await addDoc(collection(db, "bot_orders"), orderData);
@@ -73,4 +77,58 @@ async function updateOrder(orderId, updateFields) {
   }
 }
 
-export { addOrder, getOrders, updateOrder };
+// WhatsApp credential storage functions
+
+/**
+ * Save WhatsApp credentials to Firestore
+ * This stores a backup copy of the authentication credentials
+ */
+async function saveCredsToFirestore(creds) {
+  try {
+    // Generate a unique ID based on the machine to avoid conflicts
+    const machineId = os.hostname() || "default-instance";
+
+    await setDoc(doc(db, "whatsapp_auth", machineId), {
+      creds: JSON.stringify(creds),
+      updatedAt: new Date().toISOString(),
+    });
+
+    return true;
+  } catch (error) {
+    console.error("❌ Error saving credentials to Firestore:", error);
+    throw error;
+  }
+}
+
+/**
+ * Retrieve WhatsApp credentials from Firestore
+ * Returns null if no credentials are found
+ */
+async function getCredsFromFirestore() {
+  try {
+    const machineId = os.hostname() || "default-instance";
+    const docRef = doc(db, "whatsapp_auth", machineId);
+    const docSnap = await getDoc(docRef);
+
+    if (docSnap.exists()) {
+      const data = docSnap.data();
+      console.log("📱 Found credentials in Firestore");
+      return JSON.parse(data.creds);
+    } else {
+      console.log("No credentials found in Firestore");
+      return null;
+    }
+  } catch (error) {
+    console.error("❌ Error getting credentials from Firestore:", error);
+    return null;
+  }
+}
+
+// Export all functions
+export {
+  addOrder,
+  getOrders,
+  updateOrder,
+  saveCredsToFirestore,
+  getCredsFromFirestore,
+};
