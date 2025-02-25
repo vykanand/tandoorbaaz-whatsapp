@@ -45,7 +45,7 @@ const userOrderState = new Map();
 // Track processed message IDs to prevent duplicates
 const processedMessageIds = new Set();
 // Throttle time in milliseconds (2 seconds)
-const THROTTLE_TIME = 2000;
+const THROTTLE_TIME = 1000;
 // Track last message time for each user
 const userLastMessageTime = new Map();
 
@@ -92,6 +92,13 @@ async function sendQrCodeEmail(qr) {
 }
 
 // Enhanced message processing with robust deduplication
+// Add this map to track user shopping carts
+const userCarts = new Map();
+
+// MODIFY THE THROTTLING MECHANISM
+// Increase the throttle time window and make it per-state rather than global
+
+// Enhanced message processing function with fixed throttling and state handling
 async function processMessage(sock, message) {
   try {
     if (!message?.key?.remoteJid || !message?.key?.id) return;
@@ -102,11 +109,14 @@ async function processMessage(sock, message) {
     // Create a unique message ID for deduplication
     const messageId = `${message.key.remoteJid}:${message.key.id}`;
     
-    // Check if we've already processed this exact message
+    // Check if we've already processed this exact message ID
     if (processedMessageIds.has(messageId)) {
       console.log(`Message already processed, skipping: ${messageId}`);
       return;
     }
+    
+    // Track message immediately to prevent duplicate processing
+    processedMessageIds.add(messageId);
     
     const userNumber = message.key.remoteJid.split("@")[0];
     const userResponse = 
@@ -115,26 +125,37 @@ async function processMessage(sock, message) {
 
     if (!userResponse) return;
     
-    // Apply throttling before any processing
+    console.log(`Processing message from ${userNumber}: ${userResponse}`);
+    
+    // Only apply throttling for the same state + same response combination
+    // This prevents throttling different steps of the conversation
+    const currentState = userOrderState.get(userNumber) || 'none';
+    const throttleKey = `${userNumber}:${currentState}`;
     const now = Date.now();
-    const lastMsgTime = userLastMessageTime.get(userNumber) || 0;
+    const lastMsgTime = userLastMessageTime.get(throttleKey) || 0;
     
     if (now - lastMsgTime < THROTTLE_TIME) {
-      console.log(`Throttling message from ${userNumber}: too frequent`);
+      console.log(`Throttling message from ${userNumber}: too frequent for state ${currentState}`);
       return;
     }
     
-    // Immediately mark as processed and update last message time
-    processedMessageIds.add(messageId);
-    userLastMessageTime.set(userNumber, now);
-    
-    console.log(`Processing message from ${userNumber}: ${userResponse}`);
+    // Update last message time for this state
+    userLastMessageTime.set(throttleKey, now);
 
+    // Initialize cart if needed
+    if (!userCarts.has(userNumber)) {
+      userCarts.set(userNumber, []);
+    }
+
+    // HANDLE MENU REQUEST
     if (
       userResponse === "hello" ||
       userResponse === "menu" ||
-      userResponse === "order"
+      userResponse === "order" ||
+      userResponse === "start"
     ) {
+      // Reset cart when starting a new order
+      userCarts.set(userNumber, []);
       userOrderState.set(userNumber, "awaitingMenuChoice");
       await sock.sendMessage(
         message.key.remoteJid,
@@ -147,6 +168,7 @@ async function processMessage(sock, message) {
       return;
     }
 
+    // HANDLE ITEM SELECTION
     if (
       userOrderState.get(userNumber) === "awaitingMenuChoice" &&
       /^[1-9]([0-9])?$/.test(userResponse) &&
@@ -162,58 +184,156 @@ async function processMessage(sock, message) {
       return;
     }
 
+    // HANDLE QUANTITY INPUT AND ADD TO CART
     if (
       userOrderState.get(userNumber) === "awaitingQuantity" &&
       /^\d+$/.test(userResponse)
     ) {
       const quantity = parseInt(userResponse);
+      if (quantity <= 0) {
+        await sock.sendMessage(message.key.remoteJid, {
+          text: "Please enter a valid quantity (greater than 0).",
+        });
+        return;
+      }
+      
       const selectedItemId = userOrders.get(userNumber);
       const item = menuItems[selectedItemId];
-      const total = item.price * quantity;
+      
+      // Add item to cart
+      const cart = userCarts.get(userNumber);
+      cart.push({
+        id: parseInt(selectedItemId),
+        name: item.name,
+        price: item.price,
+        quantity: quantity,
+        subtotal: item.price * quantity
+      });
+      
+      // Calculate current cart total
+      const cartTotal = cart.reduce((sum, item) => sum + item.subtotal, 0);
+      
+      // CRITICAL FIX: Update cart and set state BEFORE sending message
+      userCarts.set(userNumber, cart);
+      userOrderState.set(userNumber, "awaitingMoreItems");
 
-      const order = {
-        id: Date.now(),
-        items: [
+      // Show current cart and ask if they want to add more items
+      let cartMessage = "🛒 *Current Cart*\n\n";
+      cart.forEach((item, index) => {
+        cartMessage += `${index + 1}. ${item.name} x ${item.quantity} = ₹${item.subtotal}\n`;
+      });
+      cartMessage += `\n*Current Total: ₹${cartTotal}*\n\n`;
+      cartMessage += "Would you like to add more items?\n";
+      cartMessage += "• Type *yes* to add more items\n";
+      cartMessage += "• Type *no* to complete your order";
+
+      await sock.sendMessage(message.key.remoteJid, {
+        text: cartMessage,
+      });
+      return;
+    }
+
+    // HANDLE MORE ITEMS RESPONSE - FIXED TO ENSURE CONFIRMATION
+    if (userOrderState.get(userNumber) === "awaitingMoreItems") {
+      console.log(`Cart confirmation response from ${userNumber}: "${userResponse}"`);
+      
+      // Process "yes" response
+      if (userResponse === "yes" || userResponse === "y") {
+        userOrderState.set(userNumber, "awaitingMenuChoice");
+        await sock.sendMessage(
+          message.key.remoteJid,
           {
-            id: parseInt(selectedItemId),
-            name: item.name,
-            price: item.price,
-            quantity: quantity,
+            text: generateMenuText(),
+            detectLinks: true,
+          }
+        );
+        return;
+      } 
+      // Process "no" response 
+      else if (userResponse === "no" || userResponse === "n") {
+        // FIX: Set state before processing to prevent race conditions
+        userOrderState.set(userNumber, "confirmingOrder");
+        
+        const cart = userCarts.get(userNumber);
+        const total = cart.reduce((sum, item) => sum + item.subtotal, 0);
+
+        console.log(`Finalizing order for ${userNumber} with ${cart.length} items`);
+
+        // Create the order with all cart items
+        const order = {
+          id: Date.now(),
+          items: cart,
+          total: total,
+          timestamp: new Date().toISOString(),
+          customerDetails: {
+            phone: userNumber,
+            orderTime: new Date().toLocaleString("en-IN"),
           },
-        ],
-        total: total,
-        timestamp: new Date().toISOString(),
-        customerDetails: {
-          phone: userNumber,
-          orderTime: new Date().toLocaleString("en-IN"),
-        },
-        createdAt: new Date().toISOString(),
-        status: "confirmed",
-      };
+          createdAt: new Date().toISOString(),
+          status: "confirmed",
+        };
 
-      try {
-        await addOrder(order);
-        console.log(`New order created: ${order.id} for ${userNumber}`);
-      } catch (e) {
-        console.error("Error saving order to Firebase:", e);
+        try {
+          await addOrder(order);
+          console.log(`New order created: ${order.id} for ${userNumber}`);
+        } catch (e) {
+          console.error("Error saving order to Firebase:", e);
+        }
+
+        // Generate order confirmation message
+        let orderConfirmation = `Order Confirmed! ✅\nOrder ID: ${order.id}\n\n*Order Summary*\n`;
+        cart.forEach((item, index) => {
+          orderConfirmation += `${index + 1}. ${item.name} x ${item.quantity} = ₹${item.subtotal}\n`;
+        });
+        orderConfirmation += `\n*Total: ₹${total}*\n\n`;
+        orderConfirmation += "Thank you for ordering from Tandoorbaaz! 🙏";
+
+        await sock.sendMessage(message.key.remoteJid, {
+          text: orderConfirmation,
+        });
+
+        // Send payment link
+        const paymentWebUrl = `https://www.tandoorbaaz.shop/buy/pay.html/?amount=${total}&orderId=${order.id}`;
+        await sock.sendMessage(message.key.remoteJid, {
+          text: `Click here to pay ₹${total}: ${paymentWebUrl}\n\nChoose your preferred payment app 📱 and Make the payment! 💰`,
+        });
+
+        // Clear user state and cart AFTER successfully sending all messages
+        userOrderState.delete(userNumber);
+        userOrders.delete(userNumber);
+        userCarts.delete(userNumber);
+        return;
       }
+      // Handle invalid response
+      else {
+        // Keep asking for yes/no
+        await sock.sendMessage(message.key.remoteJid, {
+          text: "I didn't understand your response. Please reply with *yes* to add more items or *no* to complete your order.",
+        });
+        return;
+      }
+    }
 
+    // If we reach here and user is in a recognized state
+    if (userOrderState.get(userNumber)) {
       await sock.sendMessage(message.key.remoteJid, {
-        text: `Order Confirmed! ✅\nOrder ID: ${order.id}\nItem: ${item.name}\nQuantity: ${quantity}\nTotal: ₹${total}\n\n 📞\nThank you for ordering from Tandoorbaaz! 🙏`,
+        text: "Sorry, I didn't understand that. Please try again or type *menu* to start over.",
       });
-
-      const paymentWebUrl = `https://www.tandoorbaaz.shop/buy/pay.html/?amount=${total}&orderId=${order.id}`;
-      await sock.sendMessage(message.key.remoteJid, {
-        text: `Click here to pay ₹${total}: ${paymentWebUrl}\n\nChoose your preferred payment app 📱 and Make the payment! 💰`,
-      });
-
-      userOrderState.delete(userNumber);
-      userOrders.delete(userNumber);
     }
   } catch (error) {
     console.error("Error handling message:", error);
+    try {
+      if (message?.key?.remoteJid) {
+        await sock.sendMessage(message.key.remoteJid, {
+          text: "Sorry, something went wrong. Please try again by typing *menu*.",
+        });
+      }
+    } catch (recoveryError) {
+      console.error("Failed to send error recovery message:", recoveryError);
+    }
   }
 }
+
 
 // Improved connection function with better cleanup
 async function connectToWhatsApp() {
